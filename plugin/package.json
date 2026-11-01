@@ -3,6 +3,11 @@
   "version": "0.9.1",
   "description": "Neuron-style long-term memory for DeepSeek Harness: Python memory core exposed through a DSH skill, CLI bridge and brain-region viewer.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/KRLRYILAGUAN/DSH-.git"
+  },
+  "homepage": "https://github.com/KRLRYILAGUAN/DSH-",
   "type": "module",
   "main": "lib/index.js",
   "icon": "./assets/icon.svg",

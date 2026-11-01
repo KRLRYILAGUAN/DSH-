@@ -1,5 +1,7 @@
 # neuron-memory · AI 神经元记忆框架（M1 原型）
 
+GitHub: https://github.com/KRLRYILAGUAN/DSH-
+
 自用 agent 记忆层：`remember / recall / forget / consolidate` 四个动词。
 工程骨架 + 神经元隐喻（突触=边权、扩散激活=图检索、遗忘=衰减、巩固=摘要合并）。
 
