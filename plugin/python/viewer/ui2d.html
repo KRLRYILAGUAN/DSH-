@@ -1,0 +1,518 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>记忆看板 · neuron_memory</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #04060c; color: #cfe3ff;
+               font: 14px/1.5 "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; }
+  #cv { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; }
+  #cv:active { cursor: grabbing; }
+  #panel { position: fixed; top: 16px; right: 16px; width: 330px; max-height: calc(100% - 32px);
+           overflow-y: auto; background: rgba(6, 12, 22, 0.86); border: 1px solid rgba(90,169,255,0.22);
+           border-radius: 12px; padding: 14px; backdrop-filter: blur(8px); }
+  h1 { font-size: 16px; margin: 0 0 8px; color: #9fd0ff; }
+  .stat { font-size: 12px; color: #8fb0d0; margin: 2px 0; }
+  .card { border-top: 1px dashed rgba(90,169,255,0.18); margin-top: 10px; padding-top: 10px; }
+  #chart { width: 100%; height: 150px; background: rgba(4,7,12,0.7); border-radius: 8px; }
+  .legend { font-size: 11px; color: #7f9dbb; margin-top: 4px; }
+  .legend span { margin-right: 10px; }
+  .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+  .row label { font-size: 11px; color: #8fb0d0; }
+  input[type=text] { flex: 1; min-width: 120px; background: #0a1626; color: #cfe3ff;
+                     border: 1px solid #244a73; border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+  select { background: #0a1626; color: #cfe3ff; border: 1px solid #244a73; border-radius: 6px;
+           padding: 4px 6px; font-size: 12px; }
+  input[type=range] { width: 100%; accent-color: #5aa9ff; }
+  .val { font-size: 11px; color: #9fd0ff; }
+  button { background: #0f2740; color: #cfe3ff; border: 1px solid #2c5d8f; border-radius: 6px;
+           padding: 4px 8px; font-size: 12px; cursor: pointer; }
+  button:hover { background: #173a5e; }
+  #card { border-top: 1px solid rgba(90,169,255,0.18); margin-top: 10px; padding-top: 8px; }
+  #card.hidden { display: none; }
+  #card h2 { font-size: 13px; margin: 0 0 6px; }
+  #cText { font-size: 12px; color: #9fc3e8; word-break: break-all; }
+  #cMeta { font-size: 11px; color: #7f9dbb; }
+  .hint { font-size: 11px; color: #5f7d9a; margin-top: 8px; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<aside id="panel">
+  <h1>记忆星图</h1>
+  <div id="stats" class="stat">加载中…</div>
+
+  <div class="row">
+    <input id="q" type="text" placeholder="搜索记忆…">
+    <select id="ftype"><option value="">全部类型</option></select>
+  </div>
+  <div class="row">
+    <label><input id="flong" type="checkbox"> 只看长期层</label>
+    <label><input id="fedge" type="checkbox"> 显示全部连线</label>
+  </div>
+  <div class="row">
+    <button id="fit">适应视角</button>
+    <button id="reset">重置</button>
+  </div>
+
+  <div id="card" class="hidden">
+    <h2 id="cTitle"></h2>
+    <p id="cText"></p>
+    <p id="cMeta"></p>
+  </div>
+
+  <div class="card">
+    <div style="font-size:13px;color:#9fd0ff;margin-bottom:4px">艾宾浩斯遗忘曲线</div>
+    <canvas id="chart" width="300" height="150"></canvas>
+    <div class="row"><label>复述 n=<span id="vn" class="val">0</span></label></div>
+    <input id="rn" type="range" min="0" max="20" value="0">
+    <div class="row"><label>长期层 τ=<span id="vt" class="val">90</span> 天</label></div>
+    <input id="rt" type="range" min="7" max="365" value="90">
+    <div class="legend">
+      <span><span class="swatch" style="background:#ff6b6b"></span>艾宾浩斯</span>
+      <span><span class="swatch" style="background:#5aa9ff"></span>本模型 n=0</span>
+      <span><span class="swatch" style="background:#4dd0a0"></span>本模型 n&gt;0</span>
+    </div>
+  </div>
+  <p class="hint">拖拽平移 · 滚轮缩放 · 点击节点聚焦（高亮邻居）</p>
+</aside>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let graph = null;
+let nodes = [];
+let adjacency = {};
+let selected = null;
+let hoverId = null;
+let cam = { x: 0, y: 0, zoom: 1 };
+let dragging = false, lx = 0, ly = 0, moved = 0;
+let showEdges = false;
+let longOnly = false;
+let filterText = '';
+let filterType = '';
+let dirty = true;
+let lastDraw = 0;
+let lastPos = [];
+const DPR = Math.min(2, window.devicePixelRatio || 1);
+const bgCanvas = document.createElement('canvas');
+
+const TYPE_COLORS = {
+  fact: '#5aa9ff', preference: '#ffd166', decision: '#4dd0a0',
+  project: '#b78bff', concept: '#ff9f6b', event: '#7fd6d6',
+  todo: '#ff6b9a', utterance: '#8fb0d0', skill: '#c0c0c0'
+};
+
+function resize() {
+  cv.width = cv.clientWidth * DPR;
+  cv.height = cv.clientHeight * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  buildNebula(cv.clientWidth, cv.clientHeight);
+  dirty = true;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function buildNebula(w, h) {
+  bgCanvas.width = w * DPR;
+  bgCanvas.height = h * DPR;
+  const g = bgCanvas.getContext('2d');
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.fillStyle = '#04060c';
+  g.fillRect(0, 0, w, h);
+
+  const rng = mulberry32(20261031);
+  const blobs = [
+    [0.25, 0.35, 0.45, 'rgba(50,90,170,0.16)'],
+    [0.72, 0.28, 0.38, 'rgba(110,80,190,0.12)'],
+    [0.55, 0.70, 0.50, 'rgba(40,120,160,0.12)'],
+    [0.18, 0.72, 0.30, 'rgba(150,90,120,0.08)']
+  ];
+  for (const [fx, fy, fr, color] of blobs) {
+    const grd = g.createRadialGradient(w * fx, h * fy, 0, w * fx, h * fy, Math.max(w, h) * fr);
+    grd.addColorStop(0, color);
+    grd.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = grd;
+    g.fillRect(0, 0, w, h);
+  }
+
+  // 星尘
+  for (let i = 0; i < 420; i++) {
+    const x = rng() * w, y = rng() * h;
+    const r = 0.3 + rng() * 1.6;
+    const a = 0.12 + rng() * 0.55;
+    const tint = rng();
+    const color = tint > 0.75 ? `rgba(170,200,255,${a})` : (tint > 0.45 ? `rgba(220,230,255,${a})` : `rgba(140,170,230,${a})`);
+    g.fillStyle = color;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+  // 少量亮星
+  for (let i = 0; i < 18; i++) {
+    const x = rng() * w, y = rng() * h;
+    const grd = g.createRadialGradient(x, y, 0, x, y, 6 + rng() * 10);
+    grd.addColorStop(0, 'rgba(200,225,255,0.5)');
+    grd.addColorStop(1, 'rgba(200,225,255,0)');
+    g.fillStyle = grd;
+    g.beginPath(); g.arc(x, y, 16, 0, Math.PI * 2); g.fill();
+  }
+}
+
+function buildLayout() {
+  const active = graph.notes.filter(n => !n.archived && n.superseded_by === null);
+  const byType = {};
+  active.forEach(n => { (byType[n.type] = byType[n.type] || []).push(n); });
+  const types = Object.keys(byType).sort();
+  const centers = {};
+  types.forEach((t, i) => {
+    const a = (i / Math.max(1, types.length)) * 2 * Math.PI;
+    centers[t] = { x: Math.cos(a) * 320, y: Math.sin(a) * 320 };
+  });
+  const rng = mulberry32(42);
+  const pts = active.map(n => {
+    const c = centers[n.type] || { x: 0, y: 0 };
+    return { n, x: c.x + (rng() - 0.5) * 90, y: c.y + (rng() - 0.5) * 90 };
+  });
+  const idx = {};
+  pts.forEach((p, i) => { idx[p.n.id] = i; });
+
+  for (let it = 0; it < 160; it++) {
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        const a = pts[i], b = pts[j];
+        let dx = b.x - a.x, dy = b.y - a.y;
+        let d2 = dx * dx + dy * dy;
+        if (d2 < 1) d2 = 1;
+        if (d2 > 170 * 170) continue;
+        const f = 850 / d2;
+        const d = Math.sqrt(d2);
+        a.x -= dx / d * f; a.y -= dy / d * f;
+        b.x += dx / d * f; b.y += dy / d * f;
+      }
+    }
+    for (const l of graph.links) {
+      const ia = idx[l.src], ib = idx[l.dst];
+      if (ia === undefined || ib === undefined) continue;
+      const a = pts[ia], b = pts[ib];
+      let dx = b.x - a.x, dy = b.y - a.y;
+      const d = Math.sqrt(dx * dx + dy * dy) || 1;
+      const f = (d - 85) * 0.03;
+      a.x += dx / d * f; a.y += dy / d * f;
+      b.x -= dx / d * f; b.y -= dy / d * f;
+    }
+    for (const p of pts) {
+      const c = centers[p.n.type] || { x: 0, y: 0 };
+      p.x += (c.x - p.x) * 0.008;
+      p.y += (c.y - p.y) * 0.008;
+      p.x *= 0.997; p.y *= 0.997;
+    }
+  }
+
+  nodes = pts;
+  adjacency = {};
+  for (const l of graph.links) {
+    (adjacency[l.src] = adjacency[l.src] || new Set()).add(l.dst);
+    (adjacency[l.dst] = adjacency[l.dst] || new Set()).add(l.src);
+  }
+  fitToView();
+}
+
+function fitToView() {
+  if (!nodes.length) return;
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (const p of nodes) {
+    minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+    minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cam.x = (minX + maxX) / 2;
+  cam.y = (minY + maxY) / 2;
+  cam.zoom = Math.min((w * 0.8) / Math.max(1, maxX - minX), (h * 0.8) / Math.max(1, maxY - minY));
+  cam.zoom = Math.max(0.3, Math.min(3, cam.zoom));
+  dirty = true;
+}
+
+function screen(p, w, h) {
+  return { X: w / 2 + (p.x - cam.x) * cam.zoom, Y: h / 2 + (p.y - cam.y) * cam.zoom };
+}
+
+function matches(n) {
+  if (longOnly && n.tier !== 'long') return false;
+  if (filterType && n.type !== filterType) return false;
+  if (filterText && !(n.text || '').toLowerCase().includes(filterText)) return false;
+  return true;
+}
+
+function hexA(hex, a) {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function draw() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(bgCanvas, 0, 0, w, h);
+  if (!graph) return;
+
+  const shown = nodes.filter(p => matches(p.n));
+  const shownIds = new Set(shown.map(p => p.n.id));
+  const focusId = selected || hoverId;
+  const focusSet = new Set();
+  if (focusId) {
+    focusSet.add(focusId);
+    for (const nb of (adjacency[focusId] || [])) {
+      if (shownIds.has(nb)) focusSet.add(nb);
+    }
+  }
+  const hasFocus = focusSet.size > 0;
+
+  const pos = {};
+  shown.forEach(p => { pos[p.n.id] = screen(p, w, h); });
+
+  // 连线
+  for (const l of graph.links) {
+    const a = pos[l.src], b = pos[l.dst];
+    if (!a || !b) continue;
+    const related = focusId && (l.src === focusId || l.dst === focusId);
+    if (!showEdges && !related) continue;
+    if (hasFocus && !related) {
+      ctx.strokeStyle = 'rgba(120,180,255,0.04)';
+    } else if (related) {
+      ctx.strokeStyle = 'rgba(130,205,255,0.6)';
+    } else {
+      ctx.strokeStyle = 'rgba(120,180,255,0.10)';
+    }
+    ctx.lineWidth = related ? 1.6 : 0.8;
+    ctx.beginPath(); ctx.moveTo(a.X, a.Y); ctx.lineTo(b.X, b.Y); ctx.stroke();
+  }
+
+  // 节点
+  for (const p of shown) {
+    const s = pos[p.n.id];
+    const n = p.n;
+    const inFocus = !hasFocus || focusSet.has(n.id);
+    const dim = hasFocus && !inFocus;
+    const r = Math.max(2.2, (3.5 + 7.5 * Math.min(1, n.importance || 0.5)) * Math.sqrt(cam.zoom));
+    const col = TYPE_COLORS[n.type] || '#8fb0d0';
+    const isSel = selected === n.id || hoverId === n.id;
+
+    if (!dim) {
+      ctx.fillStyle = hexA(col, isSel ? 0.22 : 0.10);
+      ctx.beginPath(); ctx.arc(s.X, s.Y, r * (isSel ? 3.4 : 2.4), 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = hexA(col, isSel ? 0.30 : 0.16);
+      ctx.beginPath(); ctx.arc(s.X, s.Y, r * 1.7, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = dim ? 0.25 : 1;
+    ctx.beginPath(); ctx.arc(s.X, s.Y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.globalAlpha = 1;
+
+    if (n.tier === 'long') {
+      ctx.beginPath(); ctx.arc(s.X, s.Y, r + 2, 0, Math.PI * 2);
+      ctx.strokeStyle = dim ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.4)';
+      ctx.stroke();
+    }
+    if (isSel) {
+      ctx.beginPath(); ctx.arc(s.X, s.Y, r + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = '#eaf6ff'; ctx.stroke();
+      ctx.beginPath(); ctx.arc(s.X, s.Y, r + 9, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(160,220,255,0.25)'; ctx.stroke();
+    }
+  }
+
+  // 标签：焦点节点与邻居
+  if (hasFocus) {
+    for (const p of shown) {
+      if (!focusSet.has(p.n.id)) continue;
+      const s = pos[p.n.id];
+      const label = (p.n.text || '').slice(0, 22);
+      ctx.font = '10px system-ui';
+      ctx.fillStyle = p.n.id === focusId ? 'rgba(235,248,255,0.95)' : 'rgba(190,220,255,0.75)';
+      ctx.fillText(label, s.X + 8, s.Y - 6);
+    }
+  }
+  lastPos = shown.map(p => ({ ...pos[p.n.id], n: p.n }));
+}
+
+function frame() {
+  const now = performance.now();
+  if (dirty && now - lastDraw > 20) {
+    lastDraw = now;
+    dirty = false;
+    draw();
+  }
+  requestAnimationFrame(frame);
+}
+
+function drawChart() {
+  const n = +document.getElementById('rn').value;
+  const tauDays = +document.getElementById('rt').value;
+  document.getElementById('vn').textContent = n;
+  document.getElementById('vt').textContent = tauDays;
+  const c = document.getElementById('chart');
+  const g = c.getContext('2d');
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const x0 = 34, x1 = W - 8, y0 = H - 20, y1 = 12;
+  const logMin = Math.log10(60), logMax = Math.log10(525600);
+  const x = t => x0 + (x1 - x0) * (Math.log10(t) - logMin) / (logMax - logMin);
+  const y = v => y0 - (y0 - y1) * v;
+
+  g.strokeStyle = 'rgba(120,180,255,0.18)';
+  g.beginPath(); g.moveTo(x0, y1); g.lineTo(x0, y0); g.lineTo(x1, y0); g.stroke();
+  g.fillStyle = '#5f7d9a'; g.font = '10px system-ui';
+  g.fillText('保持率', 2, y1 + 4);
+  for (const [label, t] of [['1h', 60], ['1d', 1440], ['7d', 10080], ['30d', 43200], ['90d', 129600], ['1y', 525600]]) {
+    g.fillText(label, x(t) - 8, H - 6);
+    g.strokeStyle = 'rgba(120,180,255,0.08)';
+    g.beginPath(); g.moveTo(x(t), y1); g.lineTo(x(t), y0); g.stroke();
+  }
+  g.strokeStyle = 'rgba(255,255,255,0.12)';
+  g.beginPath(); g.moveTo(x0, y(0.5)); g.lineTo(x1, y(0.5)); g.stroke();
+  g.fillText('50%', 2, y(0.5) + 3);
+
+  function curve(fn, color, width) {
+    g.beginPath();
+    for (let i = 0; i <= 140; i++) {
+      const t = 60 * Math.pow(525600 / 60, i / 140);
+      const v = Math.max(0, Math.min(1, fn(t)));
+      const px = x(t), py = y(v);
+      i ? g.lineTo(px, py) : g.moveTo(px, py);
+    }
+    g.strokeStyle = color; g.lineWidth = width; g.stroke();
+  }
+  curve(t => Math.exp(-t / (1.2 * 1440)), '#ff6b6b', 1.5);
+  curve(t => Math.exp(-t / (tauDays * 1440)), '#5aa9ff', 1.5);
+  curve(t => Math.exp(-t / (tauDays * 1440 * (1 + 0.5 * n))), '#4dd0a0', 1.8);
+}
+
+function updatePanel() {
+  if (!graph) return;
+  const s = graph.stats;
+  const shown = nodes.filter(p => matches(p.n)).length;
+  document.getElementById('stats').innerHTML =
+    `显示 ${shown} / 活跃 ${s.active} · 归档 ${s.archived} · 被取代 ${s.superseded} · 链接 ${s.links}<br>` +
+    `短期层 ${s.tiers.short} · 长期层 ${s.tiers.long}`;
+  const card = document.getElementById('card');
+  if (selected) {
+    const n = graph.notes.find(x => x.id === selected);
+    if (n) {
+      card.classList.remove('hidden');
+      document.getElementById('cTitle').textContent = `#${n.id} · ${n.type} · ${n.tier === 'long' ? '长期层' : '短期层'}`;
+      document.getElementById('cText').textContent = n.text;
+      document.getElementById('cMeta').textContent =
+        `重要度 ${n.importance} · 有效复述 ${n.n_eff} · ${n.archived ? '已归档' : (n.superseded_by ? '已被取代' : '活跃')}`;
+    }
+  } else {
+    card.classList.add('hidden');
+  }
+}
+
+function pick(e) {
+  const rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  let best = null, bestD = 15;
+  for (const p of lastPos) {
+    const d = Math.hypot(p.X - x, p.Y - y);
+    if (d < bestD) { bestD = d; best = p.n.id; }
+  }
+  selected = best;
+  dirty = true;
+  updatePanel();
+}
+
+cv.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) {
+    const rect = cv.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    let best = null, bestD = 14;
+    for (const p of lastPos) {
+      const d = Math.hypot(p.X - x, p.Y - y);
+      if (d < bestD) { bestD = d; best = p.n.id; }
+    }
+    if (best !== hoverId) { hoverId = best; dirty = true; }
+    return;
+  }
+  const dx = e.clientX - lx, dy = e.clientY - ly;
+  lx = e.clientX; ly = e.clientY;
+  moved += Math.abs(dx) + Math.abs(dy);
+  cam.x -= dx / cam.zoom;
+  cam.y -= dy / cam.zoom;
+  dirty = true;
+});
+window.addEventListener('mouseup', e => {
+  if (dragging && moved < 5) pick(e);
+  dragging = false;
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  const wx = cam.x + (mx - w / 2) / cam.zoom;
+  const wy = cam.y + (my - h / 2) / cam.zoom;
+  const factor = e.deltaY > 0 ? 0.9 : 1.1;
+  cam.zoom = Math.max(0.25, Math.min(4, cam.zoom * factor));
+  cam.x = wx - (mx - w / 2) / cam.zoom;
+  cam.y = wy - (my - h / 2) / cam.zoom;
+  dirty = true;
+}, { passive: false });
+
+document.getElementById('q').addEventListener('input', e => {
+  filterText = e.target.value.trim().toLowerCase();
+  dirty = true; updatePanel();
+});
+document.getElementById('ftype').addEventListener('change', e => {
+  filterType = e.target.value;
+  dirty = true; updatePanel();
+});
+document.getElementById('flong').addEventListener('change', e => {
+  longOnly = e.target.checked;
+  dirty = true; updatePanel();
+});
+document.getElementById('fedge').addEventListener('change', e => {
+  showEdges = e.target.checked;
+  dirty = true;
+});
+document.getElementById('fit').addEventListener('click', fitToView);
+document.getElementById('reset').addEventListener('click', () => {
+  cam = { x: 0, y: 0, zoom: 1 };
+  selected = null; hoverId = null;
+  dirty = true; updatePanel();
+});
+document.getElementById('rn').addEventListener('input', drawChart);
+document.getElementById('rt').addEventListener('input', drawChart);
+
+function refresh() {
+  fetch('/api/graph').then(r => r.json()).then(g => {
+    graph = g;
+    buildLayout();
+    const sel = document.getElementById('ftype');
+    const types = [...new Set(g.notes.map(n => n.type))].sort();
+    sel.innerHTML = '<option value="">全部类型</option>' +
+      types.map(t => `<option value="${t}"${t === filterType ? ' selected' : ''}>${t}</option>`).join('');
+    dirty = true;
+    updatePanel();
+  }).catch(() => {});
+}
+
+drawChart();
+refresh();
+setInterval(refresh, 30000);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

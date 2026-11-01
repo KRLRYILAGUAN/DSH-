@@ -1,0 +1,7 @@
+# dsh-plugin-neuron-memory bundle layer.
+#
+# Declared via the `dsh.bundle.patch` manifest in package.json, so
+# `dsh plugin add dsh-plugin-neuron-memory` mounts this insert automatically.
+- insert:
+    - id: dsh-neuron-memory
+      name: dsh-plugin-neuron-memory

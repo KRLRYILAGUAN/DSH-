@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>鲸鱼记忆实验台</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #050b14; color: #cfe3ff;
+               font: 14px/1.5 "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; }
+  #cv { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; }
+  #cv:active { cursor: grabbing; }
+  #panel { position: fixed; top: 16px; right: 16px; width: 300px; max-height: calc(100% - 32px);
+           overflow-y: auto; background: rgba(10, 22, 38, 0.88); border: 1px solid rgba(90, 169, 255, 0.25);
+           border-radius: 12px; padding: 14px; backdrop-filter: blur(6px); }
+  h1 { font-size: 16px; margin: 0 0 8px; color: #9fd0ff; }
+  #phase { font-size: 13px; color: #ffd166; }
+  #timer { font-size: 26px; font-variant-numeric: tabular-nums; margin: 2px 0 10px; }
+  .controls { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  button { background: #13304f; color: #cfe3ff; border: 1px solid #2c5d8f; border-radius: 7px;
+           padding: 6px 10px; font-size: 12px; cursor: pointer; }
+  button:hover { background: #1a416b; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  #card { border-top: 1px solid rgba(90, 169, 255, 0.2); padding-top: 10px; margin-top: 6px; }
+  #card.hidden { display: none; }
+  #card h2 { font-size: 13px; margin: 0 0 6px; }
+  #cText { font-size: 12px; color: #9fc3e8; }
+  #cShort { font-size: 12px; color: #4dd0a0; }
+  #cMeta { font-size: 12px; color: #8fb0d0; }
+  #spark { width: 100%; height: 60px; margin-top: 6px; border-radius: 6px; background: rgba(5,11,20,0.6); }
+  #log { border-top: 1px solid rgba(90, 169, 255, 0.15); margin-top: 10px; padding-top: 8px;
+         font-size: 11px; color: #7f9dbb; max-height: 120px; overflow-y: auto; }
+  #log div { margin-bottom: 3px; }
+  .hint { font-size: 11px; color: #5f7d9a; margin-top: 8px; }
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; font-size: 11px; color: #7f9dbb; margin-top: 6px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 3px; }
+  #hud { position: fixed; left: 16px; bottom: 14px; font-size: 11px; color: #7f9dbb;
+         background: rgba(10,22,38,0.72); border: 1px solid rgba(90,169,255,0.18);
+         border-radius: 8px; padding: 6px 10px; }
+  #tokbox { border-top: 1px dashed rgba(90,169,255,0.18); margin-top: 8px; padding-top: 8px; }
+  .tokline { font-size: 11px; color: #8fb0d0; margin: 2px 0; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<aside id="panel">
+  <h1>记忆周期实验台</h1>
+  <div id="phase">未开始</div>
+  <div id="timer">--:--</div>
+  <div class="controls">
+    <button id="btnStart">开始实验</button>
+    <button id="btnFast">60× 快进测试</button>
+    <button id="btnExport">导出 CSV</button>
+    <button id="btnOrbit">暂停巡航</button>
+    <button id="btnReset">重置</button>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:#5aa9ff"></span>活跃</span>
+    <span><span class="dot" style="background:#ffd166"></span>加深</span>
+    <span><span class="dot" style="background:#4dd0a0"></span>保留</span>
+    <span><span class="dot" style="background:#ff6b6b"></span>遗忘</span>
+  </div>
+  <div id="tokbox">
+    <div class="tokline" id="tokCur">对话 tokens：…</div>
+    <div class="tokline" id="tokToday">今日：…</div>
+    <div class="tokline" id="stats">—</div>
+  </div>
+  <div id="card" class="hidden">
+    <h2 id="cTitle"></h2>
+    <p id="cText"></p>
+    <p id="cShort"></p>
+    <p id="cMeta"></p>
+    <canvas id="spark" width="260" height="60"></canvas>
+    <button id="btnMention">提及 +1</button>
+    <button id="btnSelf">自检索</button>
+  </div>
+  <div id="log"></div>
+  <p class="hint">拖拽旋转 · 滚轮缩放 · 点节点/簇枢纽查看</p>
+</aside>
+<div id="hud"></div>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let state = null;
+let selected = null;      // 记忆 id
+let selectedHub = null;   // 簇 id
+let lastPos = [];
+let lastHubs = [];
+let yaw = 0.8, pitch = 0.35, zoom = 1;
+let dragging = false, lx = 0, ly = 0, moved = 0;
+let orbit = true;
+let hoverId = null;
+const stars = Array.from({ length: 170 }, () => ({
+  x: (Math.random() - 0.5) * 1800,
+  y: (Math.random() - 0.5) * 1200,
+  z: (Math.random() - 0.5) * 1800
+}));
+
+const COLORS = { active: '#5aa9ff', deepened: '#ffd166', kept: '#4dd0a0', forgotten: '#ff6b6b' };
+
+function resize() {
+  cv.width = cv.clientWidth * devicePixelRatio;
+  cv.height = cv.clientHeight * devicePixelRatio;
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function project(p, w, h) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cx = Math.cos(pitch), sx = Math.sin(pitch);
+  let x = p.x * cy - p.z * sy;
+  let z = p.x * sy + p.z * cy;
+  let y = p.y * cx - z * sx;
+  z = p.y * sx + z * cx;
+  const d = 620 / zoom;
+  const s = 640 / (d + z);
+  return { X: w / 2 + x * s, Y: h / 2 + y * s, s, z };
+}
+
+function layout(mems, clusters, w, h) {
+  const R = Math.min(w, h) * 0.33;
+  const K = Math.max(1, clusters.length);
+  const maxS = Math.max(...mems.map(m => m.S), 0.001);
+  const hubs = clusters.map((c, i) => {
+    const phi = (i / K) * 2 * Math.PI;
+    const hub = {
+      c, x: Math.cos(phi) * R * 0.6, y: Math.sin(phi * 1.3) * R * 0.16, z: Math.sin(phi) * R * 0.6
+    };
+    const members = mems.filter(m => m.cluster === c.id);
+    hub.nodes = members.map((m, j) => {
+      const ang = (j / Math.max(1, members.length)) * 2 * Math.PI + i * 0.8;
+      const sn = Math.min(1, m.S / maxS);
+      const rr = R * 0.2 * (0.55 + 0.45 * (1 - sn));
+      return {
+        m, x: hub.x + Math.cos(ang) * rr, y: hub.y + Math.sin(ang) * rr, z: hub.z + Math.sin(ang) * rr * 0.5
+      };
+    });
+    return hub;
+  });
+  return { hubs, nodes: hubs.flatMap(x => x.nodes) };
+}
+
+function drawStars(w, h) {
+  for (const s of stars) {
+    const p = project(s, w, h);
+    if (p.s <= 0) continue;
+    const a = Math.min(0.5, 0.12 + p.s * 0.18);
+    ctx.fillStyle = `rgba(160,200,255,${a.toFixed(3)})`;
+    ctx.fillRect(p.X, p.Y, 1.6, 1.6);
+  }
+}
+
+function estTokens(text) {
+  if (!text) return 0;
+  const cjk = (text.match(/[\u4e00-\u9fff]/g) || []).length;
+  const words = (text.match(/[A-Za-z0-9]+/g) || []).length;
+  return Math.round(cjk + words * 1.3 + Math.max(0, text.length - cjk) * 0.3);
+}
+
+function drawIdle() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.fillStyle = '#0a1523';
+  ctx.font = '15px system-ui';
+  ctx.textAlign = 'center';
+  ctx.fillText('点击「开始实验」，开启记忆周期', w / 2, h / 2);
+  ctx.textAlign = 'left';
+}
+
+function draw() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  const g = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.7);
+  g.addColorStop(0, '#0b1a2b'); g.addColorStop(1, '#050b14');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  drawStars(w, h);
+  if (!state || !state.started) { drawIdle(); lastPos = []; lastHubs = []; return; }
+
+  const mems = state.memories;
+  const clusters = state.clusters || [];
+  const maxS = Math.max(...mems.map(m => m.S), 0.001);
+  const lay = layout(mems, clusters, w, h);
+  const c = project({ x: 0, y: 0, z: 0 }, w, h);
+
+  // 中心核
+  ctx.beginPath(); ctx.arc(c.X, c.Y, 20, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(90,169,255,0.10)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(90,169,255,0.35)'; ctx.stroke();
+
+  // 簇枢纽与分叉
+  lastHubs = [];
+  const hubProj = lay.hubs.map(hub => {
+    const hp = project(hub, w, h);
+    const ratio = hub.c.size ? hub.c.alive / hub.c.size : 0;
+    const hx = { ...hub, ...hp, ratio };
+    lastHubs.push(hx);
+    return hx;
+  });
+
+  for (const hp of hubProj) {
+    ctx.strokeStyle = `rgba(120,180,255,${(0.10 + 0.22 * hp.ratio).toFixed(3)})`;
+    ctx.beginPath(); ctx.moveTo(c.X, c.Y); ctx.lineTo(hp.X, hp.Y); ctx.stroke();
+
+    for (const n of hp.nodes) {
+      const np = project(n, w, h);
+      const a = 0.05 + 0.18 * Math.min(1, n.m.S / maxS);
+      ctx.strokeStyle = `rgba(120,180,255,${a.toFixed(3)})`;
+      ctx.beginPath(); ctx.moveTo(hp.X, hp.Y); ctx.lineTo(np.X, np.Y); ctx.stroke();
+    }
+  }
+
+  // 枢纽节点
+  for (const hp of hubProj) {
+    const r = 10 + 10 * (hp.c.alive / Math.max(1, hp.c.size));
+    ctx.beginPath(); ctx.arc(hp.X, hp.Y, r, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(90,169,255,0.16)'; ctx.fill();
+    ctx.strokeStyle = hp.c.alive ? 'rgba(120,180,255,0.75)' : 'rgba(120,140,160,0.5)'; ctx.stroke();
+    if (selectedHub === hp.c.id) {
+      ctx.beginPath(); ctx.arc(hp.X, hp.Y, r + 5, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff'; ctx.stroke();
+    }
+    ctx.fillStyle = '#9fd0ff'; ctx.font = '12px system-ui';
+    ctx.fillText(hp.c.label, hp.X - 12, hp.Y + r + 14);
+  }
+
+  // 记忆节点
+  const nodeProj = lay.nodes.map(n => ({ ...n, ...project(n, w, h) }));
+  nodeProj.sort((a, b) => a.z - b.z);
+  for (const p of nodeProj) {
+    const m = p.m;
+    const sn = Math.min(1, m.S / maxS);
+    const r = (5 + 15 * sn) * Math.max(0.55, Math.min(1.25, p.s));
+    const col = COLORS[m.state] || '#ccc';
+    ctx.globalAlpha = m.state === 'forgotten' ? 0.32 : 1;
+    if (m.state === 'deepened') {
+      ctx.shadowColor = 'rgba(255,209,102,0.75)';
+      ctx.shadowBlur = 14;
+    }
+    ctx.beginPath(); ctx.arc(p.X, p.Y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.shadowBlur = 0;
+    if (m.state === 'deepened') {
+      ctx.beginPath(); ctx.arc(p.X, p.Y, r + 5, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,209,102,0.45)'; ctx.stroke();
+    }
+    if (selected === m.id) {
+      ctx.beginPath(); ctx.arc(p.X, p.Y, r + 8, 0, Math.PI * 2);
+      ctx.strokeStyle = '#ffffff'; ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#cfe3ff'; ctx.font = '11px system-ui';
+    ctx.fillText('#' + m.id, p.X + r + 3, p.Y + 4);
+    if (hoverId === m.id) {
+      const label = (m.short || m.text).slice(0, 28);
+      ctx.font = '11px system-ui';
+      const tw = ctx.measureText(label).width + 10;
+      ctx.fillStyle = 'rgba(8,18,30,0.92)';
+      ctx.fillRect(p.X + r + 6, p.Y - 20, tw, 16);
+      ctx.fillStyle = '#cfe3ff';
+      ctx.fillText(label, p.X + r + 11, p.Y - 8);
+    }
+  }
+  lastPos = nodeProj;
+}
+
+function frame() {
+  if (orbit && !dragging) yaw += 0.0018;
+  draw();
+  requestAnimationFrame(frame);
+}
+
+async function api(path, payload) {
+  const opt = payload === undefined ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  };
+  const r = await fetch(path, opt);
+  return r.json();
+}
+
+function fmt(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  return String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
+}
+
+function drawSpark(series) {
+  const c = document.getElementById('spark');
+  if (!c) return;
+  const g = c.getContext('2d');
+  const w = c.width, h = c.height;
+  g.clearRect(0, 0, w, h);
+  if (!series || series.length < 2) return;
+  const minT = series[0][0], maxT = series[series.length - 1][0];
+  const maxS = Math.max(...series.map(p => p[1]), 0.001);
+  g.beginPath();
+  series.forEach((p, i) => {
+    const x = 4 + (w - 8) * (p[0] - minT) / Math.max(1e-6, maxT - minT);
+    const y = h - 4 - (h - 8) * (p[1] / maxS);
+    if (i) g.lineTo(x, y); else g.moveTo(x, y);
+  });
+  g.strokeStyle = '#4dd0a0';
+  g.lineWidth = 1.5;
+  g.stroke();
+}
+
+function updatePanel() {
+  if (!state) return;
+  const phaseMap = { idle: '未开始', interaction: '互动期 · 计数中', silent: '静默期 · 禁止提及',
+                     observed: '观察期 · 无复述', done: '结束 · 二次检查完成' };
+  document.getElementById('phase').textContent = phaseMap[state.phase] || state.phase;
+  document.getElementById('timer').textContent = state.started ? fmt(state.remaining_sec) : '--:--';
+
+  const totalTokens = (state.memories || []).reduce((a, m) => a + estTokens(m.text), 0);
+  const counts = {};
+  (state.memories || []).forEach(m => { counts[m.state] = (counts[m.state] || 0) + 1; });
+  const statsEl = document.getElementById('stats');
+  if (statsEl) {
+    statsEl.textContent = state.started
+      ? `活跃 ${counts.active || 0} · 加深 ${counts.deepened || 0} · 保留 ${counts.kept || 0} · 遗忘 ${counts.forgotten || 0}`
+      : '—';
+  }
+  const hud = document.getElementById('hud');
+  if (hud) {
+    if (state.started) {
+      const sel = selected && state.memories.find(x => x.id === selected);
+      hud.textContent = `记忆 ≈ ${totalTokens.toLocaleString()} tokens · ${state.memories.length} 条` +
+        (sel ? ` · 选中 ≈ ${estTokens(sel.text)} tokens` : '');
+    } else {
+      hud.textContent = '记忆 ≈ 0 tokens · 未开始';
+    }
+  }
+
+  const card = document.getElementById('card');
+  const stateMap = { active: '活跃', deepened: '加深（超过阈值）', kept: '保留（已缩短）', forgotten: '遗忘' };
+
+  if (selectedHub !== null && state.clusters) {
+    const cl = state.clusters.find(x => x.id === selectedHub);
+    if (cl) {
+      card.classList.remove('hidden');
+      document.getElementById('cTitle').textContent = `簇「${cl.label}」`;
+      document.getElementById('cText').textContent =
+        `存活 ${cl.alive}/${cl.size} 条 · 平均记忆值 ${cl.avgS.toFixed(3)} · ≈ ${(state.memories || []).filter(x => x.cluster === cl.id).reduce((a, x) => a + estTokens(x.text), 0)} tokens`;
+      document.getElementById('cShort').textContent = '';
+      document.getElementById('cMeta').textContent = '点击簇内小节点看单条记忆';
+      document.getElementById('btnMention').disabled = true;
+      drawSpark([]);
+    }
+  } else if (selected && state.memories) {
+    const m = state.memories.find(x => x.id === selected);
+    if (m) {
+      card.classList.remove('hidden');
+      document.getElementById('cTitle').textContent =
+        `#${m.id} · ${m.kind === 'core' ? '核心' : '细节'} · ${stateMap[m.state] || m.state}`;
+      document.getElementById('cText').textContent = m.short ? '短版：' + m.short : '原文：' + m.text;
+      document.getElementById('cShort').textContent = m.short ? '原文：' + m.text : '';
+      document.getElementById('cMeta').textContent =
+        `簇 ${m.cluster} · 提及 ${m.n} 次 · 有效复述 ${m.n_eff} · 记忆值 ${m.S.toFixed(3)} · ${m.tier === 'long' ? '长期层' : '短期层'} · ≈ ${estTokens(m.text)} tokens`;
+      const canMention = state.phase === 'interaction' && (m.state === 'active' || m.state === 'deepened');
+      document.getElementById('btnMention').disabled = !canMention;
+      document.getElementById('btnSelf').disabled = !canMention;
+    } else {
+      card.classList.add('hidden');
+    }
+  } else {
+    card.classList.add('hidden');
+  }
+
+  document.getElementById('log').innerHTML =
+    (state.log || []).map(l => '<div>' + l.msg + '</div>').join('');
+}
+
+function refreshTokens() {
+  if (Date.now() - (window.__tokAt || 0) < 5000) return;
+  window.__tokAt = Date.now();
+  api('/api/tokens').then(t => {
+    document.getElementById('tokCur').textContent =
+      `本会话：输入 ${t.current.input.toLocaleString()} · 输出 ${t.current.output.toLocaleString()}`;
+    document.getElementById('tokToday').textContent =
+      `今日：输入 ${t.today.input.toLocaleString()} · 输出 ${t.today.output.toLocaleString()}`;
+  }).catch(() => {});
+}
+
+function refresh() {
+  api('/api/state').then(s => {
+    state = s;
+    updatePanel();
+    refreshTokens();
+    if (selected && selectedHub === null) {
+      api('/api/history?id=' + selected).then(h => drawSpark(h.series)).catch(() => {});
+    }
+  }).catch(() => {});
+}
+
+function pick(e) {
+  const rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  for (const hp of lastHubs) {
+    if (Math.hypot(hp.X - x, hp.Y - y) < 22) {
+      selectedHub = hp.c.id; selected = null; updatePanel(); return;
+    }
+  }
+  let best = null, bestD = 18;
+  for (const p of lastPos) {
+    const d = Math.hypot(p.X - x, p.Y - y);
+    if (d < bestD) { bestD = d; best = p.m.id; }
+  }
+  selected = best; selectedHub = null;
+  updatePanel();
+}
+
+cv.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) {
+    const rect = cv.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    let best = null, bestD = 16;
+    for (const p of lastPos) {
+      const d = Math.hypot(p.X - x, p.Y - y);
+      if (d < bestD) { bestD = d; best = p.m.id; }
+    }
+    hoverId = best;
+    return;
+  }
+  const dx = e.clientX - lx, dy = e.clientY - ly;
+  lx = e.clientX; ly = e.clientY;
+  moved += Math.abs(dx) + Math.abs(dy);
+  yaw += dx * 0.01;
+  pitch = Math.max(-1.2, Math.min(1.2, pitch + dy * 0.008));
+});
+window.addEventListener('mouseup', e => {
+  if (dragging && moved < 5) pick(e);
+  dragging = false;
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  zoom = Math.max(0.5, Math.min(3, zoom * (e.deltaY > 0 ? 0.92 : 1.08)));
+}, { passive: false });
+
+document.getElementById('btnStart').onclick = async () => {
+  await api('/api/start', { speed: 1 });
+  selected = null; selectedHub = null; refresh();
+};
+document.getElementById('btnFast').onclick = async () => {
+  await api('/api/start', { speed: 60, demo: true });
+  selected = null; selectedHub = null; refresh();
+};
+document.getElementById('btnReset').onclick = async () => {
+  await api('/api/reset');
+  selected = null; selectedHub = null; refresh();
+};
+document.getElementById('btnExport').onclick = () => { window.open('/api/export.csv', '_blank'); };
+document.getElementById('btnOrbit').onclick = () => {
+  orbit = !orbit;
+  document.getElementById('btnOrbit').textContent = orbit ? '暂停巡航' : '开始巡航';
+};
+document.getElementById('btnMention').onclick = async () => {
+  if (!selected) return;
+  await api('/api/mention', { id: selected, source: 'user' });
+  refresh();
+};
+document.getElementById('btnSelf').onclick = async () => {
+  if (!selected) return;
+  const r = await api('/api/mention', { id: selected, source: 'self' });
+  if (r && r.msg) console.log(r.msg);
+  refresh();
+};
+
+setInterval(refresh, 1000);
+refresh();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

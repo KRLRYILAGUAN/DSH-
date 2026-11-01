@@ -1,0 +1,9 @@
+{
+  "selftest": 20,
+  "region": 16,
+  "conflict": 0.95,
+  "hit1": 0.5,
+  "hit3": 0.65,
+  "mrr": 0.6,
+  "locomo10": 0.58
+}

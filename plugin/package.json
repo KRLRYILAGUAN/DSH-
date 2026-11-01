@@ -1,0 +1,56 @@
+{
+  "name": "dsh-plugin-neuron-memory",
+  "version": "0.9.1",
+  "description": "Neuron-style long-term memory for DeepSeek Harness: Python memory core exposed through a DSH skill, CLI bridge and brain-region viewer.",
+  "license": "MIT",
+  "type": "module",
+  "main": "lib/index.js",
+  "icon": "./assets/icon.svg",
+  "bin": {
+    "dsh-neuron-memory": "scripts/cli.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./icon": "./assets/icon.svg",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**",
+    "skills/**",
+    "scripts/**",
+    "python/**",
+    "assets/**",
+    "locale/**",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "memory",
+    "neuron",
+    "long-term-memory",
+    "brain",
+    "sqlite"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:no-isolation": "node --test --test-isolation=none"
+  }
+}

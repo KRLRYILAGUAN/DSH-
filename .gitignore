@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local memory / data
+.neuron-memory/
+data/models/
+data/models_rerank/
+data/neuron.db
+data/neuron.db-*
+data/*.db
+data/*.db-*
+data/locomo_tmp/
+data/locomo_tmp_rerank/
+data/selftest_*/
+data/graph.json
+backup/
+backups/
+.tmp/
+
+# Plugin build artifacts and bundled runtime
+plugin/*.tgz
+plugin/python/runtime/

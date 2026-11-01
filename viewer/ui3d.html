@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>记忆看板 · neuron_memory</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #050b14; color: #cfe3ff;
+               font: 14px/1.5 "Microsoft YaHei", system-ui, sans-serif; overflow: hidden; }
+  #cv { position: fixed; inset: 0; width: 100%; height: 100%; cursor: grab; }
+  #cv:active { cursor: grabbing; }
+  #panel { position: fixed; top: 16px; right: 16px; width: 330px; max-height: calc(100% - 32px);
+           overflow-y: auto; background: rgba(10, 22, 38, 0.9); border: 1px solid rgba(90,169,255,0.25);
+           border-radius: 12px; padding: 14px; backdrop-filter: blur(6px); }
+  h1 { font-size: 16px; margin: 0 0 8px; color: #9fd0ff; }
+  .stat { font-size: 12px; color: #8fb0d0; margin: 2px 0; }
+  .card { border-top: 1px dashed rgba(90,169,255,0.2); margin-top: 10px; padding-top: 10px; }
+  #chart { width: 100%; height: 150px; background: rgba(5,11,20,0.7); border-radius: 8px; }
+  .legend { font-size: 11px; color: #7f9dbb; margin-top: 4px; }
+  .legend span { margin-right: 10px; }
+  .swatch { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; }
+  .row { display: flex; gap: 6px; align-items: center; margin: 6px 0; flex-wrap: wrap; }
+  .row label { font-size: 11px; color: #8fb0d0; }
+  input[type=text] { flex: 1; min-width: 120px; background: #0d1f33; color: #cfe3ff;
+                     border: 1px solid #2c5d8f; border-radius: 6px; padding: 4px 8px; font-size: 12px; }
+  select { background: #0d1f33; color: #cfe3ff; border: 1px solid #2c5d8f; border-radius: 6px;
+           padding: 4px 6px; font-size: 12px; }
+  input[type=range] { width: 100%; accent-color: #5aa9ff; }
+  .val { font-size: 11px; color: #9fd0ff; }
+  button { background: #13304f; color: #cfe3ff; border: 1px solid #2c5d8f; border-radius: 6px;
+           padding: 4px 8px; font-size: 12px; cursor: pointer; }
+  button:hover { background: #1a416b; }
+  #card { border-top: 1px solid rgba(90,169,255,0.2); margin-top: 10px; padding-top: 8px; }
+  #card.hidden { display: none; }
+  #card h2 { font-size: 13px; margin: 0 0 6px; }
+  #cText { font-size: 12px; color: #9fc3e8; word-break: break-all; }
+  #cMeta { font-size: 11px; color: #7f9dbb; }
+  .hint { font-size: 11px; color: #5f7d9a; margin-top: 8px; }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<aside id="panel">
+  <h1>记忆看板</h1>
+  <div id="stats" class="stat">加载中…</div>
+
+  <div class="row">
+    <input id="q" type="text" placeholder="搜索记忆…">
+    <select id="ftype"><option value="">全部类型</option></select>
+  </div>
+  <div class="row">
+    <label><input id="flong" type="checkbox"> 只看长期层</label>
+    <label><input id="fedge" type="checkbox"> 显示轴突连接</label>
+  </div>
+  <div class="row">
+    <button id="orbit">开始自转</button>
+    <button id="fit">适应视角</button>
+    <button id="reset">重置</button>
+  </div>
+
+  <div class="card">
+    <div style="font-size:13px;color:#9fd0ff;margin-bottom:4px">艾宾浩斯遗忘曲线</div>
+    <canvas id="chart" width="300" height="150"></canvas>
+    <div class="row"><label>复述 n=<span id="vn" class="val">0</span></label></div>
+    <input id="rn" type="range" min="0" max="20" value="0">
+    <div class="row"><label>长期层 τ=<span id="vt" class="val">90</span> 天</label></div>
+    <input id="rt" type="range" min="7" max="365" value="90">
+    <div class="legend">
+      <span><span class="swatch" style="background:#ff6b6b"></span>艾宾浩斯</span>
+      <span><span class="swatch" style="background:#5aa9ff"></span>本模型 n=0</span>
+      <span><span class="swatch" style="background:#4dd0a0"></span>本模型 n&gt;0</span>
+    </div>
+  </div>
+
+  <div id="card" class="hidden">
+    <h2 id="cTitle"></h2>
+    <p id="cText"></p>
+    <p id="cMeta"></p>
+  </div>
+  <p class="hint">拖拽旋转 · 滚轮缩放 · 点击节点查看</p>
+</aside>
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+let graph = null;
+let layoutData = null;
+let selected = null;
+let hoverId = null;
+let yaw = 0.6, pitch = 0.25, zoom = 1;
+let dragging = false, lx = 0, ly = 0, moved = 0;
+let lastPos = [];
+let showEdges = false;
+let longOnly = false;
+let filterText = '';
+let filterType = '';
+let autoOrbit = false;
+
+const TYPE_COLORS = {
+  fact: '#5aa9ff', preference: '#ffd166', decision: '#4dd0a0',
+  project: '#b78bff', concept: '#ff9f6b', event: '#7fd6d6',
+  todo: '#ff6b9a', utterance: '#8fb0d0', skill: '#c0c0c0'
+};
+
+const CAM = 900, FOCAL = 1100, R = 360;
+const DPR = (() => {
+  const raw = window.devicePixelRatio || 1;
+  const w = window.innerWidth || 1280, h = window.innerHeight || 800;
+  const cap = Math.sqrt(2200000 / Math.max(1, w * h));
+  return Math.max(1, Math.min(raw, cap, 1.5));
+})();
+const bgCanvas = document.createElement('canvas');
+let dirty = true;
+let lastDraw = 0;
+
+function resize() {
+  cv.width = cv.clientWidth * DPR;
+  cv.height = cv.clientHeight * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const w = cv.clientWidth, h = cv.clientHeight;
+  bgCanvas.width = w * DPR;
+  bgCanvas.height = h * DPR;
+  const g = bgCanvas.getContext('2d');
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const grd = g.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, Math.max(w, h) * 0.7);
+  grd.addColorStop(0, '#0b1a2b');
+  grd.addColorStop(1, '#050b14');
+  g.fillStyle = grd;
+  g.fillRect(0, 0, w, h);
+  dirty = true;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function project(p, w, h) {
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  const cx = Math.cos(pitch), sx = Math.sin(pitch);
+  let x = p.x * cy - p.z * sy;
+  let z = p.x * sy + p.z * cy;
+  let y = p.y * cx - z * sx;
+  z = p.y * sx + z * cx;
+  const depth = CAM + z;
+  const s = (FOCAL / Math.max(1, depth)) * zoom;
+  return { X: w / 2 + x * s, Y: h / 2 + y * s, s, z, depth };
+}
+
+function mulberry32(seed) {
+  let a = seed >>> 0;
+  return function () {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randDir(rng) {
+  const u = rng() * 2 - 1;
+  const phi = rng() * Math.PI * 2;
+  const r = Math.sqrt(Math.max(0, 1 - u * u));
+  return { x: r * Math.cos(phi), y: u, z: r * Math.sin(phi) };
+}
+
+function addDir(a, d, k) {
+  return { x: a.x + d.x * k, y: a.y + d.y * k, z: a.z + d.z * k };
+}
+
+function norm(v) {
+  const n = Math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z) || 1;
+  return { x: v.x / n, y: v.y / n, z: v.z / n };
+}
+
+function jitterDir(d, rng, amt) {
+  return norm({
+    x: d.x + (rng() - 0.5) * amt,
+    y: d.y + (rng() - 0.5) * amt,
+    z: d.z + (rng() - 0.5) * amt
+  });
+}
+
+function growBranch(start, dir, rng, depth, branch) {
+  let p = start;
+  let d = dir;
+  let len = 46;
+  const pts = [p];
+  for (let i = 0; i < depth; i++) {
+    p = addDir(p, d, len);
+    pts.push(p);
+    d = jitterDir(d, rng, 0.55);
+    len *= 0.78;
+    if (i === depth - 2 && branch) {
+      const d1 = jitterDir(d, rng, 0.9);
+      const d2 = jitterDir(d, rng, 0.9);
+      pts.push({ sub: growBranch(p, d1, rng, 2, false) });
+      pts.push({ sub: growBranch(p, d2, rng, 2, false) });
+    }
+  }
+  return pts;
+}
+
+function buildNeuronLayout() {
+  const notes = graph.notes.filter(n => !n.archived && n.superseded_by === null);
+  const byType = {};
+  notes.forEach(n => { (byType[n.type] = byType[n.type] || []).push(n); });
+  const types = Object.keys(byType).sort();
+  const K = Math.max(1, types.length);
+  const neurons = types.map((t, i) => {
+    const y = 1 - 2 * (i + 0.5) / K;
+    const r = Math.sqrt(Math.max(0, 1 - y * y));
+    const phi = i * 2.399963;
+    const soma = {
+      x: Math.cos(phi) * r * R * 0.62,
+      y: y * R * 0.62,
+      z: Math.sin(phi) * r * R * 0.62
+    };
+    const rng = mulberry32(1000 + i * 7919);
+    const branches = [];
+    const dendrites = 3 + Math.min(3, Math.floor(byType[t].length / 5));
+    for (let b = 0; b < dendrites; b++) {
+      const out = norm({ x: soma.x + (rng() - 0.5) * 40, y: soma.y + (rng() - 0.5) * 40, z: soma.z + (rng() - 0.5) * 40 });
+      const pts = growBranch(soma, out, rng, 3, true);
+      branches.push(pts);
+    }
+    // 收集可挂载点（分支末端 + 子分支末端）
+    const tips = [];
+    for (const pts of branches) {
+      for (const p of pts) {
+        if (p.sub) {
+          for (const q of p.sub) {
+            if (typeof q !== 'object' || q.sub) continue;
+            tips.push(q);
+          }
+        } else {
+          tips.push(p);
+        }
+      }
+    }
+    const members = byType[t];
+    const nodes = members.map((n, j) => {
+      const base = tips.length ? tips[j % tips.length] : soma;
+      const rng2 = mulberry32(9000 + i * 131 + j * 17);
+      return {
+        n,
+        x: base.x + (rng2() - 0.5) * 18,
+        y: base.y + (rng2() - 0.5) * 18,
+        z: base.z + (rng2() - 0.5) * 18
+      };
+    });
+    return { type: t, soma, branches, nodes };
+  });
+  layoutData = { neurons, nodes: neurons.flatMap(x => x.nodes) };
+}
+
+function drawBranch(pts, w, h, fogBase) {
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    if (p.sub) continue;
+    const q = pts[i + 1];
+    if (!q || q.sub) continue;
+    const a = project(p, w, h), b = project(q, w, h);
+    const depth = (a.z + b.z) / 2;
+    const fog = Math.max(0.06, Math.min(0.6, 0.42 - (depth / R) * 0.28) + fogBase);
+    const width = Math.max(0.7, 2.6 - i * 0.7);
+    ctx.strokeStyle = `rgba(125,185,255,${fog.toFixed(3)})`;
+    ctx.lineWidth = width;
+    ctx.beginPath(); ctx.moveTo(a.X, a.Y); ctx.lineTo(b.X, b.Y); ctx.stroke();
+  }
+  for (const p of pts) {
+    if (p.sub) { drawBranch(p.sub, w, h, fogBase); }
+  }
+  // 末端突触
+  const last = pts[pts.length - 1];
+  if (last && !last.sub) {
+    const lp = project(last, w, h);
+    ctx.beginPath(); ctx.arc(lp.X, lp.Y, 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(160,210,255,0.55)'; ctx.fill();
+  }
+}
+
+function draw() {
+  const w = cv.clientWidth, h = cv.clientHeight;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(bgCanvas, 0, 0, w, h);
+  if (!graph || !layoutData) return;
+
+  const nodes = layoutData.nodes.filter(p => matches(p.n));
+  const proj = nodes.map(p => ({ ...p, ...project(p, w, h) }));
+  const byId = {};
+  proj.forEach(p => { byId[p.n.id] = p; });
+
+  // 神经核（胞体）与树突
+  for (const nrn of layoutData.neurons) {
+    const soma = project(nrn.soma, w, h);
+    const grd = ctx.createRadialGradient(soma.X, soma.Y, 0, soma.X, soma.Y, 26);
+    grd.addColorStop(0, 'rgba(120,200,255,0.35)');
+    grd.addColorStop(1, 'rgba(120,200,255,0)');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(soma.X, soma.Y, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(soma.X, soma.Y, 7, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(140,205,255,0.85)'; ctx.fill();
+    ctx.fillStyle = '#9fd0ff'; ctx.font = '11px system-ui';
+    ctx.fillText(nrn.type, soma.X + 10, soma.Y - 8);
+    for (const pts of nrn.branches) drawBranch(pts, w, h, 0);
+  }
+
+  // 轴突连接（可选）
+  if (showEdges) {
+    for (const l of graph.links) {
+      const a = byId[l.src], b = byId[l.dst];
+      if (!a || !b) continue;
+      const related = selected && (l.src === selected || l.dst === selected);
+      if (!related && (l.weight || 0) < 0.5) continue;
+      const mx = (a.X + b.X) / 2, my = (a.Y + b.Y) / 2;
+      const dx = b.X - a.X, dy = b.Y - a.Y;
+      ctx.strokeStyle = `rgba(150,200,255,${(related ? 0.45 : 0.08).toFixed(2)})`;
+      ctx.lineWidth = related ? 1.4 : 0.8;
+      ctx.beginPath(); ctx.moveTo(a.X, a.Y); ctx.quadraticCurveTo(mx - dy * 0.12, my + dx * 0.12, b.X, b.Y); ctx.stroke();
+    }
+  }
+
+  // 突触小体（记忆节点）
+  proj.sort((a, b) => a.z - b.z);
+  for (const p of proj) {
+    const n = p.n;
+    const fog = Math.max(0.25, Math.min(1, 1.05 - (p.z / R) * 0.4));
+    const r = Math.max(2, (3.5 + 6.5 * Math.min(1, n.importance || 0.5)) * p.s * 0.9);
+    const col = TYPE_COLORS[n.type] || '#8fb0d0';
+    const isSel = selected === n.id || hoverId === n.id;
+    ctx.globalAlpha = isSel ? 1 : fog;
+    if (isSel) { ctx.shadowColor = col; ctx.shadowBlur = 8; }
+    ctx.beginPath(); ctx.arc(p.X, p.Y, r, 0, Math.PI * 2);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.shadowBlur = 0;
+    if (n.tier === 'long') {
+      ctx.beginPath(); ctx.arc(p.X, p.Y, r + 2, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(255,255,255,${(0.4 * fog).toFixed(2)})`; ctx.stroke();
+    }
+    if (isSel) {
+      ctx.beginPath(); ctx.arc(p.X, p.Y, r + 4, 0, Math.PI * 2);
+      ctx.strokeStyle = '#fff'; ctx.stroke();
+      ctx.fillStyle = '#cfe3ff'; ctx.font = '10px system-ui';
+      ctx.fillText('#' + n.id, p.X + r + 3, p.Y + 3);
+    }
+    ctx.globalAlpha = 1;
+  }
+  lastPos = proj;
+}
+
+function frame() {
+  if (autoOrbit && !dragging) {
+    yaw += 0.002;
+    pitch = 0.25 + Math.sin(Date.now() / 9000) * 0.05;
+    dirty = true;
+  }
+  const now = performance.now();
+  if (dirty && now - lastDraw > 22) {
+    lastDraw = now;
+    dirty = false;
+    draw();
+  }
+  requestAnimationFrame(frame);
+}
+
+function drawChart() {
+  const n = +document.getElementById('rn').value;
+  const tauDays = +document.getElementById('rt').value;
+  document.getElementById('vn').textContent = n;
+  document.getElementById('vt').textContent = tauDays;
+  const c = document.getElementById('chart');
+  const g = c.getContext('2d');
+  const W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const x0 = 34, x1 = W - 8, y0 = H - 20, y1 = 12;
+  const logMin = Math.log10(60), logMax = Math.log10(525600);
+  const x = t => x0 + (x1 - x0) * (Math.log10(t) - logMin) / (logMax - logMin);
+  const y = v => y0 - (y0 - y1) * v;
+
+  g.strokeStyle = 'rgba(120,180,255,0.18)';
+  g.beginPath(); g.moveTo(x0, y1); g.lineTo(x0, y0); g.lineTo(x1, y0); g.stroke();
+  g.fillStyle = '#5f7d9a'; g.font = '10px system-ui';
+  g.fillText('保持率', 2, y1 + 4);
+  for (const [label, t] of [['1h', 60], ['1d', 1440], ['7d', 10080], ['30d', 43200], ['90d', 129600], ['1y', 525600]]) {
+    g.fillText(label, x(t) - 8, H - 6);
+    g.strokeStyle = 'rgba(120,180,255,0.08)';
+    g.beginPath(); g.moveTo(x(t), y1); g.lineTo(x(t), y0); g.stroke();
+  }
+  g.strokeStyle = 'rgba(255,255,255,0.12)';
+  g.beginPath(); g.moveTo(x0, y(0.5)); g.lineTo(x1, y(0.5)); g.stroke();
+  g.fillText('50%', 2, y(0.5) + 3);
+
+  function curve(fn, color, width) {
+    g.beginPath();
+    for (let i = 0; i <= 140; i++) {
+      const t = 60 * Math.pow(525600 / 60, i / 140);
+      const v = Math.max(0, Math.min(1, fn(t)));
+      const px = x(t), py = y(v);
+      i ? g.lineTo(px, py) : g.moveTo(px, py);
+    }
+    g.strokeStyle = color; g.lineWidth = width; g.stroke();
+  }
+  curve(t => Math.exp(-t / (1.2 * 1440)), '#ff6b6b', 1.5);
+  curve(t => Math.exp(-t / (tauDays * 1440)), '#5aa9ff', 1.5);
+  curve(t => Math.exp(-t / (tauDays * 1440 * (1 + 0.5 * n))), '#4dd0a0', 1.8);
+}
+
+function matches(n) {
+  if (longOnly && n.tier !== 'long') return false;
+  if (filterType && n.type !== filterType) return false;
+  if (filterText && !(n.text || '').toLowerCase().includes(filterText)) return false;
+  return true;
+}
+
+function updatePanel() {
+  if (!graph) return;
+  const s = graph.stats;
+  const shown = graph.notes.filter(n => !n.archived && n.superseded_by === null && matches(n)).length;
+  document.getElementById('stats').innerHTML =
+    `显示 ${shown} / 活跃 ${s.active} · 归档 ${s.archived} · 被取代 ${s.superseded} · 链接 ${s.links}<br>` +
+    `短期层 ${s.tiers.short} · 长期层 ${s.tiers.long}`;
+  const card = document.getElementById('card');
+  if (selected) {
+    const n = graph.notes.find(x => x.id === selected);
+    if (n) {
+      card.classList.remove('hidden');
+      document.getElementById('cTitle').textContent = `#${n.id} · ${n.type} · ${n.tier === 'long' ? '长期层' : '短期层'}`;
+      document.getElementById('cText').textContent = n.text;
+      document.getElementById('cMeta').textContent =
+        `重要度 ${n.importance} · 有效复述 ${n.n_eff} · ${n.archived ? '已归档' : (n.superseded_by ? '已被取代' : '活跃')}`;
+    }
+  } else {
+    card.classList.add('hidden');
+  }
+}
+
+function pick(e) {
+  const rect = cv.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  let best = null, bestD = 14;
+  for (const p of lastPos) {
+    const d = Math.hypot(p.X - x, p.Y - y);
+    if (d < bestD) { bestD = d; best = p.n.id; }
+  }
+  selected = best;
+  updatePanel();
+}
+
+cv.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
+window.addEventListener('mousemove', e => {
+  if (!dragging) {
+    const rect = cv.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    let best = null, bestD = 12;
+    for (const p of lastPos) {
+      const d = Math.hypot(p.X - x, p.Y - y);
+      if (d < bestD) { bestD = d; best = p.n.id; }
+    }
+    if (best !== hoverId) { hoverId = best; dirty = true; }
+    return;
+  }
+  const dx = e.clientX - lx, dy = e.clientY - ly;
+  lx = e.clientX; ly = e.clientY;
+  moved += Math.abs(dx) + Math.abs(dy);
+  yaw += dx * 0.009;
+  pitch = Math.max(-1.3, Math.min(1.3, pitch + dy * 0.007));
+  dirty = true;
+});
+window.addEventListener('mouseup', e => {
+  if (dragging && moved < 5) pick(e);
+  dragging = false;
+});
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  zoom = Math.max(0.4, Math.min(3, zoom * (e.deltaY > 0 ? 0.92 : 1.08)));
+  dirty = true;
+}, { passive: false });
+
+document.getElementById('q').addEventListener('input', e => {
+  filterText = e.target.value.trim().toLowerCase();
+  updatePanel();
+});
+document.getElementById('ftype').addEventListener('change', e => {
+  filterType = e.target.value;
+  updatePanel();
+});
+document.getElementById('flong').addEventListener('change', e => {
+  longOnly = e.target.checked;
+  updatePanel();
+});
+document.getElementById('fedge').addEventListener('change', e => {
+  showEdges = e.target.checked;
+});
+document.getElementById('orbit').addEventListener('click', e => {
+  autoOrbit = !autoOrbit;
+  e.target.textContent = autoOrbit ? '暂停自转' : '开始自转';
+});
+document.getElementById('fit').addEventListener('click', () => {
+  if (!lastPos.length) return;
+  let minX = 1e9, maxX = -1e9, minY = 1e9, maxY = -1e9;
+  for (const p of lastPos) {
+    minX = Math.min(minX, p.X); maxX = Math.max(maxX, p.X);
+    minY = Math.min(minY, p.Y); maxY = Math.max(maxY, p.Y);
+  }
+  const w = cv.clientWidth, h = cv.clientHeight;
+  const zx = (w * 0.78) / Math.max(1, maxX - minX);
+  const zy = (h * 0.78) / Math.max(1, maxY - minY);
+  zoom = Math.max(0.4, Math.min(3, Math.min(zx, zy)));
+  dirty = true;
+});
+document.getElementById('reset').addEventListener('click', () => {
+  yaw = 0.6; pitch = 0.25; zoom = 1; selected = null; hoverId = null;
+  dirty = true;
+  updatePanel();
+});
+document.getElementById('rn').addEventListener('input', drawChart);
+document.getElementById('rt').addEventListener('input', drawChart);
+
+function refresh() {
+  fetch('/api/graph').then(r => r.json()).then(g => {
+    graph = g;
+    buildNeuronLayout();
+    dirty = true;
+    const sel = document.getElementById('ftype');
+    const types = [...new Set(g.notes.map(n => n.type))].sort();
+    sel.innerHTML = '<option value="">全部类型</option>' +
+      types.map(t => `<option value="${t}"${t === filterType ? ' selected' : ''}>${t}</option>`).join('');
+    updatePanel();
+  }).catch(() => {});
+}
+
+drawChart();
+refresh();
+setInterval(refresh, 15000);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
